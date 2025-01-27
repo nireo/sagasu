@@ -19,17 +19,35 @@ func NewServer(addr string, store *registry.Store) *http.Server {
 
 		json.NewEncoder(w).Encode(state)
 	})
+
 	mux.HandleFunc("POST /state", func(w http.ResponseWriter, r *http.Request) {
-		var state registry.State
-		if err := json.NewDecoder(r.Body).Decode(&state); err != nil {
+		var req registry.ApplyRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		if err := store.SaveState(&state); err != nil {
+		if err := store.AddToGroup(req.AddData.Group, req.AddData.Instance); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mux.HandleFunc("DELETE /state", func(w http.ResponseWriter, r *http.Request) {
+		var req registry.ApplyRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if err := store.RemoveFromGroup(req.RemoveData.Group, req.RemoveData.InstanceID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
 	})
 
 	return &http.Server{
