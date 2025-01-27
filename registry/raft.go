@@ -186,6 +186,94 @@ func (s *Store) setupRaft(dataDir string) error {
 	return err
 }
 
+// Apply is used to apply a log to the registry
 func (s *Store) Apply(log *raft.Log) interface{} {
+	return nil
+}
+
+// Snapshot is used to create a snapshot of the registry state
+func (s *Store) Snapshot() (raft.FSMSnapshot, error) {
+	return nil, nil
+}
+
+// Restore is used to restore the snapshot
+func (s *Store) Restore(snapshot []byte) error {
+	return nil
+}
+
+// IsLeader returns true if the node is the leader
+func (s *Store) IsLeader() bool {
+	return s.raft.State() == raft.Leader
+}
+
+// Close closes the Raft store
+func (s *Store) Close() error {
+	future := s.raft.Shutdown()
+	if err := future.Error(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Join is used to join a node to the Raft cluster
+func (s *Store) Join(id, addr string) error {
+	s.log.Info("raft: joining node", zap.String("id", id), zap.String("addr", addr))
+	if !s.IsLeader() {
+		return ErrNotLeader
+	}
+
+	serverID := raft.ServerID(id)
+	serverAddr := raft.ServerAddress(addr)
+
+	future := s.raft.GetConfiguration()
+	if err := future.Error(); err != nil {
+		return err
+	}
+
+	for _, server := range future.Configuration().Servers {
+		if server.ID == serverID || server.Address == serverAddr {
+			if server.ID == serverID && server.Address == serverAddr {
+				s.log.Info("raft: node already joined", zap.String("id", id), zap.String("addr", addr))
+				return nil
+			}
+
+			removeFuture := s.raft.RemoveServer(serverID, 0, 0)
+			if err := removeFuture.Error(); err != nil {
+				return err
+			}
+		}
+	}
+
+	addFuture := s.raft.AddVoter(serverID, serverAddr, 0, 0)
+	if err := addFuture.Error(); err != nil {
+		if err == raft.ErrNotLeader {
+			s.log.Info("raft: not leader, retrying", zap.String("id", id), zap.String("addr", addr))
+			return ErrNotLeader
+		}
+		return err
+	}
+
+	s.log.Info("raft: node joined", zap.String("id", id), zap.String("addr", addr))
+	return nil
+}
+
+// Leave is used to leave the Raft cluster
+func (s *Store) Leave(id string) error {
+	s.log.Info("raft: leaving node", zap.String("id", id))
+	if !s.IsLeader() {
+		return ErrNotLeader
+	}
+
+	f := s.raft.RemoveServer(raft.ServerID(id), 0, 0)
+	if err := f.Error(); err != nil {
+		if err == raft.ErrNotLeader {
+			s.log.Info("raft: not leader", zap.String("id", id))
+			return ErrNotLeader
+		}
+		return err
+	}
+
+	s.log.Info("raft: node left", zap.String("id", id))
 	return nil
 }
