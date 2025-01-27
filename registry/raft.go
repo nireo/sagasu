@@ -2,8 +2,10 @@ package registry
 
 import (
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -105,6 +107,7 @@ type Config struct {
 		Bootstrap         bool          // Bootstrap is used to determine if the Raft cluster should be bootstrapped
 		SnapshotThreshold uint64        // Snapshot threshold for Raft signifies how many logs to keep before creating a snapshot
 		SnapshotInterval  time.Duration // Snapshot interval for Raft signifies how often to create a snapshot
+		DataDir           string        // DataDir is the directory to store the Raft data
 	}
 	Transport *Transport // Transport is the transport layer for Raft
 }
@@ -112,10 +115,11 @@ type Config struct {
 // Store is the Raft store for the registry
 type Store struct {
 	config  *Config
-	raftDir string
 	raft    *raft.Raft
 	log     *zap.Logger
 	tn      *raft.NetworkTransport
+	storage *PersistantStorage
+	state   *State
 }
 
 // snapshot is a snapshot of the registry state.
@@ -124,18 +128,69 @@ type snapshot struct {
 	encoded []byte    // the registry state encoded as json
 }
 
-func (s *Store) setupRaft(dataDir string) error {
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
+type getStateResponse struct {
+	State *State
+	Error error
+}
+
+type addToGroupResponse struct {
+	Error error
+}
+
+type removeFromGroupResponse struct {
+	Error error
+}
+
+func (s *Store) setupStorage(dataDir string) error {
+	storage, err := NewStorage(dataDir)
+	if err != nil {
 		return err
 	}
+	s.storage = storage
+	return nil
+}
 
-	s.raftDir = dataDir
-	stablepb, err := raftboltdb.NewBoltStore(filepath.Join(dataDir, "raft", "raft.db"))
+func (s *Store) setupState(dataDir string) error {
+	state, err := s.storage.GetState()
 	if err != nil {
 		return err
 	}
 
-	snapshots, err := raft.NewFileSnapshotStore(filepath.Join(dataDir, "raft"), 3, os.Stdout)
+	s.state = state
+	return nil
+}
+
+func NewStore(config *Config) (*Store, error) {
+	store := &Store{
+		config: config,
+	}
+
+	if err := store.setupStorage(config.Raft.DataDir); err != nil {
+		return nil, err
+	}
+
+	if err := store.setupState(config.Raft.DataDir); err != nil {
+		return nil, err
+	}
+
+	if err := store.setupRaft(); err != nil {
+		return nil, err
+	}
+
+	return store, nil
+}
+
+func (s *Store) setupRaft() error {
+	if err := os.MkdirAll(s.config.Raft.DataDir, 0755); err != nil {
+		return err
+	}
+
+	stablepb, err := raftboltdb.NewBoltStore(filepath.Join(s.config.Raft.DataDir, "raft", "raft.db"))
+	if err != nil {
+		return err
+	}
+
+	snapshots, err := raft.NewFileSnapshotStore(filepath.Join(s.config.Raft.DataDir, "raft"), 3, os.Stdout)
 	if err != nil {
 		return err
 	}
@@ -188,7 +243,32 @@ func (s *Store) setupRaft(dataDir string) error {
 
 // Apply is used to apply a log to the registry
 func (s *Store) Apply(log *raft.Log) interface{} {
+	var req ApplyRequest
+	if err := json.Unmarshal(log.Data, &req); err != nil {
+		return err
+	}
+
+	if req.ActionType == "add" {
+		s.state.Services[req.AddData.Group].Instances[req.AddData.Instance.ID] = &req.AddData.Instance
+
+		err := s.storage.SaveState(s.state)
+		return addToGroupResponse{Error: err}
+	} else if req.ActionType == "remove" {
+		delete(s.state.Services[req.RemoveData.Group].Instances, req.RemoveData.InstanceID)
+
+		if err := s.storage.SaveState(s.state); err != nil {
+			return removeFromGroupResponse{Error: err}
+		}
+		return removeFromGroupResponse{}
+	} else if req.ActionType == "get" {
+		return getStateResponse{State: s.state, Error: nil}
+	}
+
 	return nil
+}
+
+func (s *Store) GetState() (*State, error) {
+	return s.state, nil
 }
 
 // Snapshot is used to create a snapshot of the registry state
@@ -197,7 +277,7 @@ func (s *Store) Snapshot() (raft.FSMSnapshot, error) {
 }
 
 // Restore is used to restore the snapshot
-func (s *Store) Restore(snapshot []byte) error {
+func (s *Store) Restore(rc io.ReadCloser) error {
 	return nil
 }
 
@@ -276,4 +356,70 @@ func (s *Store) Leave(id string) error {
 
 	s.log.Info("raft: node left", zap.String("id", id))
 	return nil
+}
+
+func (s *Store) WaitForLeader(timeout time.Duration) error {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			l := s.LeaderAddr()
+			if l != "" {
+				return nil
+			}
+		case <-timer.C:
+			return errors.New("timed out waiting for leader")
+		}
+	}
+}
+
+func (s *Store) apply(req *ApplyRequest) (interface{}, error) {
+	data, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+
+	timeout := 10 * time.Second
+	future := s.raft.Apply(data, timeout)
+	if err := future.Error(); err != nil {
+		return nil, err
+	}
+
+	res := future.Response()
+	return res, nil
+}
+
+func (s *Store) AddToGroup(group string, instance Instance) error {
+	res, err := s.apply(AddToGroup(group, instance))
+	if err != nil {
+		return err
+	}
+
+	if res != nil {
+		return res.(addToGroupResponse).Error
+	}
+	return nil
+}
+
+func (s *Store) RemoveFromGroup(group string, instanceID string) error {
+	res, err := s.apply(RemoveFromGroup(group, instanceID))
+	if err != nil {
+		return err
+	}
+
+	if res != nil {
+		return res.(removeFromGroupResponse).Error
+	}
+
+	return nil
+}
+
+func (s *Store) LeaderAddr() string {
+	leader, _ := s.raft.LeaderWithID()
+	return string(leader)
 }
