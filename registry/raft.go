@@ -150,7 +150,7 @@ func (s *Store) setupStorage(dataDir string) error {
 	return nil
 }
 
-func (s *Store) setupState(dataDir string) error {
+func (s *Store) setupState() error {
 	state, err := s.storage.GetState()
 	if err != nil {
 		return err
@@ -163,13 +163,13 @@ func (s *Store) setupState(dataDir string) error {
 func NewStore(config *Config) (*Store, error) {
 	store := &Store{
 		config: config,
+		state: &State{
+			Services: make(map[string]*Group),
+			Version:  0,
+		},
 	}
 
 	if err := store.setupStorage(config.Raft.DataDir); err != nil {
-		return nil, err
-	}
-
-	if err := store.setupState(config.Raft.DataDir); err != nil {
 		return nil, err
 	}
 
@@ -181,7 +181,7 @@ func NewStore(config *Config) (*Store, error) {
 }
 
 func (s *Store) setupRaft() error {
-	if err := os.MkdirAll(s.config.Raft.DataDir, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(s.config.Raft.DataDir, "raft"), 0755); err != nil {
 		return err
 	}
 
@@ -219,6 +219,8 @@ func (s *Store) setupRaft() error {
 		config.CommitTimeout = s.config.Raft.CommitTimeout
 	}
 
+	config.LocalID = raft.ServerID(s.config.Raft.LocalID)
+
 	s.raft, err = raft.NewRaft(config, s, stablepb, stablepb, snapshots, s.tn)
 	if err != nil {
 		return err
@@ -249,8 +251,13 @@ func (s *Store) Apply(log *raft.Log) interface{} {
 	}
 
 	if req.ActionType == "add" {
-		s.state.Services[req.AddData.Group].Instances[req.AddData.Instance.ID] = &req.AddData.Instance
+		if _, ok := s.state.Services[req.AddData.Group]; !ok {
+			s.state.Services[req.AddData.Group] = &Group{
+				Instances: make(map[string]*Instance),
+			}
+		}
 
+		s.state.Services[req.AddData.Group].Instances[req.AddData.Instance.ID] = &req.AddData.Instance
 		err := s.storage.SaveState(s.state)
 		return addToGroupResponse{Error: err}
 	} else if req.ActionType == "remove" {

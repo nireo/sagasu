@@ -21,11 +21,17 @@ func getFreePort() (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	defer l.Close()
 	return l.Addr().(*net.TCPAddr).Port, nil
 }
 
-func newTestStore(t *testing.T, port, id int, bootstrap bool) (*Store, error) {
-	datadir, err := os.MkdirTemp("", "sagasu-raft-test")
+func newTestStore(t *testing.T, id int, bootstrap bool) (*Store, error) {
+	datadir, err := os.MkdirTemp("", fmt.Sprintf("sagasu-raft-test-%d", id))
+	if err != nil {
+		return nil, err
+	}
+
+	port, err := getFreePort()
 	if err != nil {
 		return nil, err
 	}
@@ -39,6 +45,7 @@ func newTestStore(t *testing.T, port, id int, bootstrap bool) (*Store, error) {
 	conf.Raft.LeaderLeaseTimeout = 50 * time.Millisecond
 	conf.Raft.CommitTimeout = 5 * time.Millisecond
 	conf.Raft.SnapshotThreshold = 10000
+	conf.Raft.SnapshotInterval = 3 * time.Second
 
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
@@ -67,21 +74,21 @@ func TestRaft(t *testing.T) {
 	stores := make([]*Store, nodeCount)
 
 	for i := 0; i < nodeCount; i++ {
-		port, err := getFreePort()
-		assert.NoError(t, err)
-
-		store, err := newTestStore(t, port, i, i == 0)
+		store, err := newTestStore(t, i, i == 0)
 		assert.NoError(t, err)
 		stores[i] = store
 
 		if i != 0 {
 			err = stores[0].Join(fmt.Sprintf("%d", i), stores[i].config.Transport.Addr().String())
 			assert.NoError(t, err)
+			time.Sleep(100 * time.Millisecond)
 		} else {
 			err = stores[0].WaitForLeader(3 * time.Second)
 			assert.NoError(t, err)
 		}
 	}
+
+	time.Sleep(500 * time.Millisecond)
 
 	stores[0].AddToGroup("test", Instance{ID: "test"})
 	time.Sleep(500 * time.Millisecond)
