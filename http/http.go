@@ -21,13 +21,13 @@ func NewServer(addr string, store *registry.Store) *http.Server {
 	})
 
 	mux.HandleFunc("POST /state", func(w http.ResponseWriter, r *http.Request) {
-		var req registry.ApplyRequest
+		var req registry.AddToGroupRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		if err := store.AddToGroup(req.AddData.Group, req.AddData.Instance); err != nil {
+		if err := store.AddToGroup(req.Group, req.Instance); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -36,13 +36,13 @@ func NewServer(addr string, store *registry.Store) *http.Server {
 	})
 
 	mux.HandleFunc("DELETE /state", func(w http.ResponseWriter, r *http.Request) {
-		var req registry.ApplyRequest
+		var req registry.RemoveFromGroupRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		if err := store.RemoveFromGroup(req.RemoveData.Group, req.RemoveData.InstanceID); err != nil {
+		if err := store.RemoveFromGroup(req.Group, req.InstanceID); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
