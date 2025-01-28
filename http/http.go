@@ -50,6 +50,23 @@ func NewServer(addr string, store *registry.Store) *http.Server {
 		w.WriteHeader(http.StatusOK)
 	})
 
+	mux.HandleFunc("GET /services/{group}", func(w http.ResponseWriter, r *http.Request) {
+		group := r.PathValue("group")
+		state, err := store.GetState()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		groupState, ok := state.Services[group]
+		if !ok {
+			http.Error(w, "group not found", http.StatusNotFound)
+			return
+		}
+
+		json.NewEncoder(w).Encode(groupState)
+	})
+
 	return &http.Server{
 		Addr:    addr,
 		Handler: mux,
