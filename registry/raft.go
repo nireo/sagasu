@@ -281,11 +281,43 @@ func (s *Store) GetState() (*State, error) {
 
 // Snapshot is used to create a snapshot of the registry state
 func (s *Store) Snapshot() (raft.FSMSnapshot, error) {
-	return nil, nil
+	s.log.Info("creating snapshot")
+	data, err := json.Marshal(s.state)
+	if err != nil {
+		return nil, err
+	}
+
+	return &snapshot{
+		created: time.Now(),
+		encoded: data,
+	}, nil
+}
+
+func (s *snapshot) Persist(sink raft.SnapshotSink) error {
+	_, err := sink.Write(s.encoded)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Release is used to release the snapshot
+func (s *snapshot) Release() {
 }
 
 // Restore is used to restore the snapshot
 func (s *Store) Restore(rc io.ReadCloser) error {
+	var state State
+	if err := json.NewDecoder(rc).Decode(&state); err != nil {
+		return err
+	}
+
+	s.state = &state
+	if err := s.storage.SaveState(s.state); err != nil {
+		return err
+	}
+
 	return nil
 }
 

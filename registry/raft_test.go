@@ -1,14 +1,17 @@
 package registry
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/hashicorp/raft"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func getFreePort() (int, error) {
@@ -97,4 +100,87 @@ func TestRaft(t *testing.T) {
 	state, err := stores[1].GetState()
 	assert.NoError(t, err)
 	assert.Equal(t, state.Services["test"].Instances["test"].ID, "test")
+}
+
+type testSnapshotSink struct {
+	file *os.File
+}
+
+func newTestSnapshotSink(path string) (*testSnapshotSink, error) {
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, err
+	}
+	return &testSnapshotSink{file: f}, nil
+}
+
+func (s *testSnapshotSink) Write(p []byte) (n int, err error) {
+	return s.file.Write(p)
+}
+
+func (s *testSnapshotSink) Close() error {
+	return s.file.Close()
+}
+
+func (s *testSnapshotSink) ID() string {
+	return "test-snapshot"
+}
+
+func (s *testSnapshotSink) Cancel() error {
+	if err := s.file.Close(); err != nil {
+		return err
+	}
+	return os.Remove(s.file.Name())
+}
+
+func TestSnapshotIntegration(t *testing.T) {
+	nodeCount := 3
+	stores := make([]*Store, nodeCount)
+
+	for i := 0; i < nodeCount; i++ {
+		store, err := newTestStore(t, i, i == 0)
+		assert.NoError(t, err)
+		stores[i] = store
+
+		if i != 0 {
+			err = stores[0].Join(fmt.Sprintf("%d", i), stores[i].config.Transport.Addr().String())
+			assert.NoError(t, err)
+			time.Sleep(100 * time.Millisecond)
+		} else {
+			err = stores[0].WaitForLeader(3 * time.Second)
+			assert.NoError(t, err)
+		}
+	}
+
+	time.Sleep(1 * time.Second)
+
+	err := stores[0].AddToGroup("test-group", Instance{ID: "test1"})
+	require.NoError(t, err)
+	err = stores[0].AddToGroup("test-group", Instance{ID: "test2"})
+	require.NoError(t, err)
+
+	time.Sleep(500 * time.Millisecond)
+
+	for i, store := range stores {
+		snap, err := store.Snapshot()
+		require.NoError(t, err)
+
+		tmpDir := t.TempDir()
+		sink, err := newTestSnapshotSink(filepath.Join(tmpDir, "node-snapshot"))
+		require.NoError(t, err)
+
+		err = snap.Persist(sink)
+		require.NoError(t, err)
+
+		snapshotData, err := os.ReadFile(filepath.Join(tmpDir, "node-snapshot"))
+		require.NoError(t, err)
+
+		var state State
+		err = json.Unmarshal(snapshotData, &state)
+		require.NoError(t, err)
+
+		assert.Contains(t, state.Services, "test-group", "Node %d missing test-group", i)
+		assert.Contains(t, state.Services["test-group"].Instances, "test1", "Node %d missing test1", i)
+		assert.Contains(t, state.Services["test-group"].Instances, "test2", "Node %d missing test2", i)
+	}
 }
