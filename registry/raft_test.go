@@ -46,6 +46,7 @@ func newTestStore(t *testing.T, id int, bootstrap bool) (*Store, error) {
 	conf.Raft.CommitTimeout = 5 * time.Millisecond
 	conf.Raft.SnapshotThreshold = 10000
 	conf.Raft.SnapshotInterval = 3 * time.Second
+	conf.Raft.DataDir = datadir
 
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {

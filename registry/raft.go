@@ -141,8 +141,8 @@ type removeFromGroupResponse struct {
 	Error error
 }
 
-func (s *Store) setupStorage(dataDir string) error {
-	storage, err := NewStorage(dataDir)
+func (s *Store) setupStorage() error {
+	storage, err := NewStorage(s.config.Raft.DataDir)
 	if err != nil {
 		return err
 	}
@@ -167,9 +167,10 @@ func NewStore(config *Config) (*Store, error) {
 			Services: make(map[string]*Group),
 			Version:  0,
 		},
+		log: zap.L().With(zap.String("component", "raft")),
 	}
 
-	if err := store.setupStorage(config.Raft.DataDir); err != nil {
+	if err := store.setupStorage(); err != nil {
 		return nil, err
 	}
 
