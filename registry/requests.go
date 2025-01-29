@@ -12,6 +12,7 @@ type RemoveFromGroupRequest struct {
 	InstanceID string `json:"instance_id"`
 }
 
+// ApplyRequest is used to apply an action to the registry
 type ApplyRequest struct {
 	ActionType string                  `json:"action_type"`
 	RemoveData *RemoveFromGroupRequest `json:"remove_data,omitempty"`

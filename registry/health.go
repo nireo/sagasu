@@ -90,7 +90,7 @@ func (hc *HealthChecker) checkInstance(groupName string, instanceID string, inst
 	ctx, cancel := context.WithTimeout(context.Background(), hc.timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", instance.Address, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", instance.Address+"/health", nil)
 	if err != nil {
 		return StatusUnhealthy
 	}

@@ -184,3 +184,33 @@ func TestSnapshotIntegration(t *testing.T) {
 		assert.Contains(t, state.Services["test-group"].Instances, "test2", "Node %d missing test2", i)
 	}
 }
+
+type storeWithPath struct {
+	store *Store
+	path  string
+}
+
+type TestCluster struct {
+	stores []storeWithPath
+}
+
+func (ts *TestCluster) Close() {
+	for _, store := range ts.stores {
+		store.store.Close()
+		os.RemoveAll(store.path)
+	}
+}
+
+func createTestCluster(t *testing.T, nodeCount int) (*TestCluster, error) {
+	stores := make([]storeWithPath, nodeCount)
+
+	for i := 0; i < nodeCount; i++ {
+		store, err := newTestStore(t, i, i == 0)
+		if err != nil {
+			return nil, err
+		}
+		stores[i] = storeWithPath{store: store, path: store.config.Raft.DataDir}
+	}
+
+	return &TestCluster{stores: stores}, nil
+}

@@ -67,6 +67,10 @@ func NewServer(addr string, store *registry.Store) *http.Server {
 		json.NewEncoder(w).Encode(groupState)
 	})
 
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
 	return &http.Server{
 		Addr:    addr,
 		Handler: mux,
