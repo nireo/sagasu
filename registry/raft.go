@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/raft"
@@ -120,6 +121,8 @@ type Store struct {
 	tn      *raft.NetworkTransport
 	storage *PersistantStorage
 	state   *State
+	lbMu    sync.RWMutex
+	lbs     map[string]LoadBalancer // group name -> load balancer
 }
 
 // snapshot is a snapshot of the registry state.
@@ -462,4 +465,45 @@ func (s *Store) RemoveFromGroup(group string, instanceID string) error {
 func (s *Store) LeaderAddr() string {
 	leader, _ := s.raft.LeaderWithID()
 	return string(leader)
+}
+
+// SetLoadBalancer sets the load balancer for a group
+func (s *Store) SetLoadBalancer(group string, lbType LoadBalancingAlgorithm) error {
+	s.lbMu.Lock()
+	defer s.lbMu.Unlock()
+	var lb LoadBalancer
+	switch lbType {
+	case LoadBalancingAlgorithmRoundRobin:
+		lb = NewRoundRobinBalancer(s)
+	default:
+		return fmt.Errorf("unknown load balancing algorithm: %s", lbType)
+	}
+
+	s.lbs[group] = lb
+	return nil
+}
+
+// GetBalancedNextInstance gets the next instance to use based on the load balancer
+func (s *Store) GetBalancedNextInstance(group string) (*Instance, error) {
+	s.lbMu.RLock()
+	lb, ok := s.lbs[group]
+	s.lbMu.RUnlock()
+
+	if !ok {
+		lb = NewRoundRobinBalancer(s)
+		s.SetLoadBalancer(group, LoadBalancingAlgorithmRoundRobin)
+	}
+
+	return lb.Next(group)
+}
+
+// RecordMetrics records the metrics for an instance
+func (s *Store) RecordMetrics(group string, instanceID string, connections int64) {
+	s.lbMu.RLock()
+	lb, ok := s.lbs[group]
+	s.lbMu.RUnlock()
+
+	if ok {
+		lb.Record(instanceID, connections)
+	}
 }

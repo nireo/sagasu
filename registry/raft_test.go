@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,6 +14,7 @@ import (
 	"github.com/hashicorp/raft"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
 func getFreePort() (int, error) {
@@ -210,7 +213,102 @@ func createTestCluster(t *testing.T, nodeCount int) (*TestCluster, error) {
 			return nil, err
 		}
 		stores[i] = storeWithPath{store: store, path: store.config.Raft.DataDir}
+
+		if i != 0 {
+			err = stores[0].store.Join(fmt.Sprintf("%d", i), stores[i].store.config.Transport.Addr().String())
+			if err != nil {
+				return nil, err
+			}
+			time.Sleep(100 * time.Millisecond)
+		} else {
+			err = stores[0].store.WaitForLeader(3 * time.Second)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	return &TestCluster{stores: stores}, nil
+}
+
+func setupTestServer(t *testing.T, healty bool) *httptest.Server {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if healty {
+			w.WriteHeader(http.StatusOK)
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	}))
+	return server
+}
+
+func TestHealthChecker(t *testing.T) {
+	healthyServer := setupTestServer(t, true)
+	unhealthyServer := setupTestServer(t, false)
+	defer healthyServer.Close()
+	defer unhealthyServer.Close()
+	var err error
+
+	nodeCount := 3
+	stores := make([]*Store, nodeCount)
+
+	for i := 0; i < nodeCount; i++ {
+		store, err := newTestStore(t, i, i == 0)
+		assert.NoError(t, err)
+		stores[i] = store
+
+		if i != 0 {
+			err = stores[0].Join(fmt.Sprintf("%d", i), stores[i].config.Transport.Addr().String())
+			assert.NoError(t, err)
+			time.Sleep(100 * time.Millisecond)
+		} else {
+			err = stores[0].WaitForLeader(3 * time.Second)
+			assert.NoError(t, err)
+		}
+	}
+
+	// Wait for leader election and cluster stability
+	err = stores[0].WaitForLeader(5 * time.Second)
+	require.NoError(t, err)
+
+	err = stores[0].AddToGroup("test-group", Instance{
+		ID:      "healthy-instance",
+		Address: healthyServer.URL,
+	})
+	require.NoError(t, err)
+
+	err = stores[0].AddToGroup("test-group", Instance{
+		ID:      "unhealthy-instance",
+		Address: unhealthyServer.URL,
+	})
+	require.NoError(t, err)
+
+	// Wait for state replication
+	time.Sleep(1 * time.Second)
+
+	logger, _ := zap.NewDevelopment()
+	hc := NewHealthChecker(stores[0], 100*time.Millisecond, 50*time.Millisecond, logger)
+	hc.Start()
+	defer hc.Stop()
+
+	// Use polling instead of fixed sleep
+	require.Eventually(t, func() bool {
+		status, exists := hc.GetStatus("test-group", "healthy-instance")
+		return exists && status == StatusHealthy
+	}, 3*time.Second, 100*time.Millisecond, "Healthy instance status not updated")
+
+	require.Eventually(t, func() bool {
+		status, exists := hc.GetStatus("test-group", "unhealthy-instance")
+		return exists && status == StatusUnhealthy
+	}, 3*time.Second, 100*time.Millisecond, "Unhealthy instance status not updated")
+
+	// Wait for removal of unhealthy instance
+	require.Eventually(t, func() bool {
+		state, err := stores[0].GetState()
+		if err != nil {
+			return false
+		}
+		_, exists := state.Services["test-group"].Instances["unhealthy-instance"]
+		return !exists
+	}, 3*time.Second, 100*time.Millisecond, "Unhealthy instance not removed")
 }
